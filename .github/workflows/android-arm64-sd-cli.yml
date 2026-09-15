@@ -28,8 +28,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ninja-build cmake git file binutils zip
       - name: Install pinned Android NDK
+        shell: bash
         run: |
-          yes | sdkmanager "ndk;${NDK_VERSION}"
+          set -euo pipefail
+          SDKMANAGER="$(find "${ANDROID_SDK_ROOT}/cmdline-tools" -type f -name sdkmanager -perm -111 | head -n 1)"
+          test -n "${SDKMANAGER}"
+          yes | "${SDKMANAGER}" "ndk;${NDK_VERSION}"
           test -f "${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}/build/cmake/android.toolchain.cmake"
 
       - name: Fetch pinned stable-diffusion.cpp source
