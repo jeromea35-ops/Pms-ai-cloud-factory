@@ -1,0 +1,124 @@
+name: Cloud SD1.5 Model Demo
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/cloud-sd15-model-demo.yml
+
+permissions:
+  contents: read
+
+env:
+  SD_REPO: https://github.com/leejet/stable-diffusion.cpp.git
+  SD_COMMIT: 59c23bce0d82be3a922023ab811194f05b3e2faa
+  MODEL_COMMIT: f41080936c76af537542aedf67f0dab94e1f337f
+  MODEL_FILE: stable-diffusion-v1-5-pruned-emaonly-Q4_0.gguf
+  MODEL_SHA256: b8944e9fe0b69b36ae1b5bb0185b3a7b8ef14347fe0fa9af6c64c4829022261f
+
+jobs:
+  exact-model-demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout factory repository
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build git curl file
+
+      - name: Fetch exact engine source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone "${SD_REPO}" sd-src
+          cd sd-src
+          git checkout "${SD_COMMIT}"
+          git submodule update --init --recursive
+          test "$(git rev-parse HEAD)" = "${SD_COMMIT}"
+
+      - name: Build Linux CPU sd-cli
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S sd-src -B build-linux -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_OPENMP=OFF \
+            -DSD_WEBP=OFF \
+            -DSD_WEBM=OFF
+          cmake --build build-linux --target sd-cli --parallel 2
+          SDCLI="$(find build-linux -type f -name sd-cli -perm -111 | head -n 1)"
+          test -n "${SDCLI}"
+          echo "SDCLI=${SDCLI}" >> "${GITHUB_ENV}"
+          "${SDCLI}" --help >/dev/null
+
+      - name: Download and verify exact Q4_0 model
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL_URL="https://huggingface.co/second-state/stable-diffusion-v1-5-GGUF/resolve/${MODEL_COMMIT}/${MODEL_FILE}?download=true"
+          curl --fail --location --retry 5 --retry-delay 5 \
+            --output "${MODEL_FILE}" "${MODEL_URL}"
+          echo "${MODEL_SHA256}  ${MODEL_FILE}" | sha256sum --check --strict
+
+      - name: Generate fair model demo
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p demo
+          /usr/bin/time -v "${SDCLI}" \
+            -m "${MODEL_FILE}" \
+            -p "beautiful lush green rice field at sunrise, a small farmhouse in the distance, coconut trees, golden morning light, realistic landscape photography, natural colors, highly detailed, sharp focus" \
+            -n "text, watermark, logo, collage, grid, mosaic, blurry, distorted, people, close-up fruit, cut fruit" \
+            -W 512 -H 512 \
+            --steps 20 \
+            --cfg-scale 7 \
+            --seed 12345 \
+            -t 4 \
+            --mmap \
+            --backend cpu \
+            -o demo/sd15-q4-model-demo-512.png \
+            2>&1 | tee demo/inference.log
+
+      - name: Verify demo image
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import struct
+          from pathlib import Path
+
+          image = Path("demo/sd15-q4-model-demo-512.png")
+          data = image.read_bytes()
+          if data[:8] != b"\x89PNG\r\n\x1a\n":
+              raise SystemExit("Output is not a PNG")
+          width, height = struct.unpack(">II", data[16:24])
+          if (width, height) != (512, 512):
+              raise SystemExit(f"Unexpected dimensions: {width}x{height}")
+          print(f"Verified PNG: {width}x{height}, {len(data)} bytes")
+          PY
+          sha256sum demo/sd15-q4-model-demo-512.png | tee demo/SHA256SUMS.txt
+          {
+            echo "Factory commit: ${GITHUB_SHA}"
+            echo "stable-diffusion.cpp commit: ${SD_COMMIT}"
+            echo "Model: ${MODEL_FILE}"
+            echo "Model commit: ${MODEL_COMMIT}"
+            echo "Model SHA-256: ${MODEL_SHA256}"
+            echo "Image size: 512x512"
+            echo "Steps: 20"
+            echo "Seed: 12345"
+            echo "VAE tiling: OFF"
+          } > demo/DEMO-MANIFEST.txt
+
+      - name: Upload exact-model demo
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pms-sd15-q4-exact-model-demo
+          path: demo/
+          if-no-files-found: warn
+          retention-days: 7
