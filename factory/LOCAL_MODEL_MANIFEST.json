@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "target": {
+    "runtime": "offline-local",
+    "primaryDeviceClass": "Android ARM64, 8 GB physical RAM",
+    "networkRequiredAtInference": false,
+    "paidApiFallbackAllowed": false,
+    "loadPolicy": "sequential-model-load-unload"
+  },
+  "packs": {
+    "VISUAL_PACK_V1": {
+      "status": "verified-source",
+      "engine": "stable-diffusion.cpp",
+      "engineCommit": "59c23bce0d82be3a922023ab811194f05b3e2faa",
+      "model": {
+        "repo": "second-state/stable-diffusion-v1-5-GGUF",
+        "revision": "f41080936c76af537542aedf67f0dab94e1f337f",
+        "file": "stable-diffusion-v1-5-pruned-emaonly-Q4_0.gguf",
+        "sha256": "b8944e9fe0b69b36ae1b5bb0185b3a7b8ef14347fe0fa9af6c64c4829022261f"
+      }
+    },
+    "TAMIL_VOICE_PACK_V1": {
+      "status": "hash-discovery-pending",
+      "role": "local fallback voice pack",
+      "license": "CC-BY-4.0",
+      "voices": [
+        {
+          "id": "ta-rasa-female-medium",
+          "repo": "tinisoft/piper-ta_IN-rasa_female-medium",
+          "revision": "89e15ed",
+          "modelFile": "ta_IN-rasa_female-medium.onnx",
+          "configFile": "ta_IN-rasa_female-medium.onnx.json"
+        },
+        {
+          "id": "ta-rasa-male-medium",
+          "repo": "tinisoft/piper-ta_IN-rasa_male-medium",
+          "revision": "0b041f8",
+          "modelFile": "ta_IN-rasa_male-medium.onnx",
+          "configFile": "ta_IN-rasa_male-medium.onnx.json"
+        }
+      ]
+    },
+    "LIPSYNC_PACK_V1": {
+      "status": "pending-device-feasibility",
+      "candidate": "MuseTalk",
+      "notes": "Do not auto-download until Android ARM64 runtime/RAM and dependency-license gates pass."
+    },
+    "MOTION_PACK_V1": {
+      "status": "pending-device-feasibility",
+      "notes": "Adapter slot only until an 8 GB Android memory test passes for the chosen I2V runtime."
+    },
+    "SINGING_PACK_V1": {
+      "status": "pending-model-selection",
+      "notes": "Must be local/offline and commercially usable before inclusion."
+    }
+  }
+}

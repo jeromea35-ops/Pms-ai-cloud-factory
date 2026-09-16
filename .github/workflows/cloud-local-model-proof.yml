@@ -1,0 +1,80 @@
+name: PMS Local Model Pack Proof
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [local-engine-factory-v1]
+    paths:
+      - factory/LOCAL_MODEL_MANIFEST.json
+      - .github/workflows/cloud-local-model-proof.yml
+
+permissions:
+  contents: read
+
+jobs:
+  voice-pack-proof:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout factory repo
+        uses: actions/checkout@v4
+
+      - name: Validate local model manifest
+        run: |
+          python3 - <<'PY'
+          import json
+          with open('factory/LOCAL_MODEL_MANIFEST.json', encoding='utf-8') as f:
+              data = json.load(f)
+          assert data['target']['networkRequiredAtInference'] is False
+          assert data['target']['paidApiFallbackAllowed'] is False
+          assert data['packs']['VISUAL_PACK_V1']['status'] == 'verified-source'
+          print('manifest PASS')
+          PY
+      - name: Download exact Tamil Piper voice files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p work/female work/male proof/configs proof/licenses
+          base_f='https://huggingface.co/tinisoft/piper-ta_IN-rasa_female-medium/resolve/89e15ed'
+          base_m='https://huggingface.co/tinisoft/piper-ta_IN-rasa_male-medium/resolve/0b041f8'
+          curl --fail --location --retry 5 --retry-delay 3 -o work/female/model.onnx "$base_f/ta_IN-rasa_female-medium.onnx"
+          curl --fail --location --retry 5 --retry-delay 3 -o work/female/model.onnx.json "$base_f/ta_IN-rasa_female-medium.onnx.json"
+          curl --fail --location --retry 5 --retry-delay 3 -o proof/licenses/female-README.md "$base_f/README.md"
+          curl --fail --location --retry 5 --retry-delay 3 -o work/male/model.onnx "$base_m/ta_IN-rasa_male-medium.onnx"
+          curl --fail --location --retry 5 --retry-delay 3 -o work/male/model.onnx.json "$base_m/ta_IN-rasa_male-medium.onnx.json"
+          curl --fail --location --retry 5 --retry-delay 3 -o proof/licenses/male-README.md "$base_m/README.md"
+          test -s work/female/model.onnx
+          test -s work/male/model.onnx
+          grep -qi 'CC-BY-4.0' proof/licenses/female-README.md
+          grep -qi 'CC-BY-4.0' proof/licenses/male-README.md
+
+      - name: Record exact hashes and sizes
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum work/female/model.onnx work/female/model.onnx.json work/male/model.onnx work/male/model.onnx.json > proof/VOICE_SHA256SUMS.txt
+          stat -c '%n %s' work/female/model.onnx work/female/model.onnx.json work/male/model.onnx work/male/model.onnx.json > proof/VOICE_SIZES.txt
+          cp work/female/model.onnx.json proof/configs/ta_IN-rasa_female-medium.onnx.json
+          cp work/male/model.onnx.json proof/configs/ta_IN-rasa_male-medium.onnx.json
+          cp factory/LOCAL_MODEL_MANIFEST.json proof/LOCAL_MODEL_MANIFEST.input.json
+      - name: Write source proof
+        shell: bash
+        run: |
+          cat > proof/SOURCE-REVISIONS.txt <<'EOF'
+          female repo: tinisoft/piper-ta_IN-rasa_female-medium
+          female revision: 89e15ed
+          male repo: tinisoft/piper-ta_IN-rasa_male-medium
+          male revision: 0b041f8
+          voice license: CC-BY-4.0
+          runtime intent: offline/local only
+          EOF
+          echo "factory commit: $GITHUB_SHA" >> proof/SOURCE-REVISIONS.txt
+
+      - name: Upload small proof artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pms-local-model-pack-proof
+          path: proof/
+          if-no-files-found: error
+          retention-days: 7
