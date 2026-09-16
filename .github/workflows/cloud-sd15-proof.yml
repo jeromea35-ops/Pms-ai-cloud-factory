@@ -1,0 +1,126 @@
+name: Cloud SD1.5 Output Proof
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/cloud-sd15-proof.yml
+
+permissions:
+  contents: read
+
+env:
+  SD_REPO: https://github.com/leejet/stable-diffusion.cpp.git
+  SD_COMMIT: 59c23bce0d82be3a922023ab811194f05b3e2faa
+  MODEL_COMMIT: f41080936c76af537542aedf67f0dab94e1f337f
+  MODEL_FILE: stable-diffusion-v1-5-pruned-emaonly-Q4_0.gguf
+  MODEL_SHA256: b8944e9fe0b69b36ae1b5bb0185b3a7b8ef14347fe0fa9af6c64c4829022261f
+
+jobs:
+  generate-proof-image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout factory repository
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends cmake ninja-build git curl file
+
+      - name: Fetch the exact verified engine source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone "${SD_REPO}" sd-src
+          cd sd-src
+          git checkout "${SD_COMMIT}"
+          git submodule update --init --recursive
+          test "$(git rev-parse HEAD)" = "${SD_COMMIT}"
+
+      - name: Build Linux CPU sd-cli
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S sd-src -B build-linux -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_OPENMP=OFF \
+            -DSD_WEBP=OFF \
+            -DSD_WEBM=OFF
+          cmake --build build-linux --target sd-cli --parallel 2
+          SDCLI="$(find build-linux -type f -name sd-cli -perm -111 | head -n 1)"
+          test -n "${SDCLI}"
+          echo "SDCLI=${SDCLI}" >> "${GITHUB_ENV}"
+          file "${SDCLI}"
+          "${SDCLI}" --help >/dev/null
+
+      - name: Download and verify the exact phone model
+        shell: bash
+        run: |
+          set -euo pipefail
+          MODEL_URL="https://huggingface.co/second-state/stable-diffusion-v1-5-GGUF/resolve/${MODEL_COMMIT}/${MODEL_FILE}?download=true"
+          curl --fail --location --retry 5 --retry-delay 5 \
+            --output "${MODEL_FILE}" "${MODEL_URL}"
+          echo "${MODEL_SHA256}  ${MODEL_FILE}" | sha256sum --check --strict
+
+      - name: Generate one real proof image
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p proof
+          /usr/bin/time -v "${SDCLI}" \
+            -m "${MODEL_FILE}" \
+            -p "a single fresh green leaf on a plain white background, centered botanical illustration, clean details" \
+            -n "text, watermark, frame, duplicate leaf, blurry" \
+            -W 256 -H 256 \
+            --steps 4 \
+            --cfg-scale 5 \
+            --seed 42 \
+            -t 2 \
+            --mmap \
+            --backend cpu \
+            --vae-tiling \
+            --vae-tile-size 64x64 \
+            -o proof/generated-leaf-256.png \
+            2>&1 | tee proof/inference.log
+
+      - name: Verify and describe the proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import struct
+          from pathlib import Path
+
+          image = Path("proof/generated-leaf-256.png")
+          data = image.read_bytes()
+          if data[:8] != b"\x89PNG\r\n\x1a\n":
+              raise SystemExit("Output is not a PNG")
+          width, height = struct.unpack(">II", data[16:24])
+          if (width, height) != (256, 256):
+              raise SystemExit(f"Unexpected dimensions: {width}x{height}")
+          print(f"Verified PNG: {width}x{height}, {len(data)} bytes")
+          PY
+          sha256sum proof/generated-leaf-256.png | tee proof/SHA256SUMS.txt
+          {
+            echo "Factory commit: ${GITHUB_SHA}"
+            echo "stable-diffusion.cpp commit: ${SD_COMMIT}"
+            echo "Model commit: ${MODEL_COMMIT}"
+            echo "Model SHA-256: ${MODEL_SHA256}"
+            echo "Image size: 256x256"
+            echo "Steps: 4"
+            echo "Seed: 42"
+            echo "Backend: Linux x64 CPU cloud proof"
+          } > proof/PROOF-MANIFEST.txt
+
+      - name: Upload proof image and evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pms-sd15-cloud-output-proof
+          path: proof/
+          if-no-files-found: warn
+          retention-days: 7
