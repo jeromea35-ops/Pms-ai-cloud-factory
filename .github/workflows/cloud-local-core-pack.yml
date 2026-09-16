@@ -1,0 +1,138 @@
+name: PMS Android ARM64 Local Core Pack
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [local-engine-factory-v1]
+    paths:
+      - .github/workflows/cloud-local-core-pack.yml
+      - factory/LOCAL_MODEL_MANIFEST.json
+      - scripts/fetch-local-model-pack.sh
+
+permissions:
+  contents: read
+
+env:
+  SD_REPO: https://github.com/leejet/stable-diffusion.cpp.git
+  SD_COMMIT: 59c23bce0d82be3a922023ab811194f05b3e2faa
+  NDK_VERSION: 27.2.12479018
+  ANDROID_API: 28
+
+jobs:
+  build-core-pack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+
+    steps:
+      - name: Checkout factory repository
+        uses: actions/checkout@v4
+
+      - name: Install host build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ninja-build cmake git file binutils curl
+      - name: Install pinned Android NDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$(find "${ANDROID_SDK_ROOT}/cmdline-tools" -type f -name sdkmanager -perm -111 | head -n 1)"
+          test -n "$SDKMANAGER"
+          set +o pipefail
+          yes | "$SDKMANAGER" "ndk;${NDK_VERSION}" || true
+          set -o pipefail
+          test -f "${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}/build/cmake/android.toolchain.cmake"
+
+      - name: Fetch exact stable-diffusion.cpp source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone "$SD_REPO" sd-src
+          cd sd-src
+          git checkout "$SD_COMMIT"
+          git submodule update --init --recursive
+          test "$(git rev-parse HEAD)" = "$SD_COMMIT"
+
+      - name: Configure Android ARM64 CPU build
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake -S sd-src -B build-android -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-${ANDROID_API} \
+            -DANDROID_STL=c++_static \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_OPENMP=OFF -DSD_WEBP=OFF -DSD_WEBM=OFF
+      - name: Build and verify sd-cli
+        shell: bash
+        run: |
+          set -euo pipefail
+          cmake --build build-android --target sd-cli --parallel 2
+          SDCLI="$(find build-android -type f -name sd-cli -perm -111 | head -n 1)"
+          test -n "$SDCLI"
+          file "$SDCLI" | tee sd-cli.file.txt
+          readelf -h "$SDCLI" | grep -Eq 'Machine:.*AArch64'
+          echo "SDCLI=$SDCLI" >> "$GITHUB_ENV"
+
+      - name: Download and verify pinned Tamil voices
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p voices/female voices/male
+          F='https://huggingface.co/tinisoft/piper-ta_IN-rasa_female-medium/resolve/89e15edafc8b31e66ddf25f2adbe3bd3f20a9496'
+          M='https://huggingface.co/tinisoft/piper-ta_IN-rasa_male-medium/resolve/0b041f8e882b1e6f41f427169be25bcb0e94f352'
+          curl -fL --retry 5 -o voices/female/model.onnx "$F/ta_IN-rasa_female-medium.onnx"
+          curl -fL --retry 5 -o voices/female/model.onnx.json "$F/ta_IN-rasa_female-medium.onnx.json"
+          curl -fL --retry 5 -o voices/male/model.onnx "$M/ta_IN-rasa_male-medium.onnx"
+          curl -fL --retry 5 -o voices/male/model.onnx.json "$M/ta_IN-rasa_male-medium.onnx.json"
+          echo '1befd7c4034429cecf3143d5eab4810b29833420aedb951bef4092779d074d59  voices/female/model.onnx' | sha256sum -c --strict
+          echo 'e49a5f947bfe64bc232d9f900a163b3b771b812780fd8efe0d411a3d8f4b4ee2  voices/female/model.onnx.json' | sha256sum -c --strict
+          echo '0df057808d684ce59e3fd1cb02d6bfd5ef860d14a9e3c515c65ca5c61062ce39  voices/male/model.onnx' | sha256sum -c --strict
+          echo 'b4e9c2b637d80f4a6de1be6ffd6c7ae1bc97a1420698e2bf9df7fedc352488d1  voices/male/model.onnx.json' | sha256sum -c --strict
+      - name: Assemble local core pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p pack/bin pack/models/voice/female pack/models/voice/male pack/manifests pack/tools
+          cp "$SDCLI" pack/bin/sd-cli
+          "${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" pack/bin/sd-cli || true
+          cp voices/female/model.onnx pack/models/voice/female/ta_IN-rasa_female-medium.onnx
+          cp voices/female/model.onnx.json pack/models/voice/female/ta_IN-rasa_female-medium.onnx.json
+          cp voices/male/model.onnx pack/models/voice/male/ta_IN-rasa_male-medium.onnx
+          cp voices/male/model.onnx.json pack/models/voice/male/ta_IN-rasa_male-medium.onnx.json
+          cp factory/LOCAL_MODEL_MANIFEST.json pack/manifests/
+          cp scripts/fetch-local-model-pack.sh pack/tools/
+          cp sd-cli.file.txt pack/manifests/
+          cat > pack/manifests/BUILD-MANIFEST.txt <<EOF
+          stable-diffusion.cpp commit: ${SD_COMMIT}
+          ABI: arm64-v8a
+          Android API: ${ANDROID_API}
+          STL: c++_static
+          backend: CPU
+          voices: Tamil Rasa female+male medium
+          inference network required: false
+          paid API fallback allowed: false
+          EOF
+      - name: Generate pack checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > pack/verify.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          cd "$(dirname "$0")"
+          sha256sum -c SHA256SUMS
+          ./bin/sd-cli --help >/dev/null
+          echo 'PMS local core pack verification PASS'
+          EOF
+          chmod +x pack/verify.sh
+          (cd pack && find . -type f ! -name SHA256SUMS -print0 | sort -z | xargs -0 sha256sum > SHA256SUMS)
+          du -sh pack
+
+      - name: Upload assembly-ready core pack
+        uses: actions/upload-artifact@v4
+        with:
+          name: pms-local-core-pack-android-arm64
+          path: pack/
+          if-no-files-found: error
+          retention-days: 7
