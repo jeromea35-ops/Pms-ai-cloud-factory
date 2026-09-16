@@ -20,23 +20,27 @@
       }
     },
     "TAMIL_VOICE_PACK_V1": {
-      "status": "hash-discovery-pending",
+      "status": "verified-cloud-proof",
       "role": "local fallback voice pack",
       "license": "CC-BY-4.0",
       "voices": [
         {
           "id": "ta-rasa-female-medium",
           "repo": "tinisoft/piper-ta_IN-rasa_female-medium",
-          "revision": "89e15ed",
+          "revision": "89e15edafc8b31e66ddf25f2adbe3bd3f20a9496",
           "modelFile": "ta_IN-rasa_female-medium.onnx",
-          "configFile": "ta_IN-rasa_female-medium.onnx.json"
+          "modelSha256": "1befd7c4034429cecf3143d5eab4810b29833420aedb951bef4092779d074d59",
+          "configFile": "ta_IN-rasa_female-medium.onnx.json",
+          "configSha256": "e49a5f947bfe64bc232d9f900a163b3b771b812780fd8efe0d411a3d8f4b4ee2"
         },
         {
           "id": "ta-rasa-male-medium",
           "repo": "tinisoft/piper-ta_IN-rasa_male-medium",
-          "revision": "0b041f8",
+          "revision": "0b041f8e882b1e6f41f427169be25bcb0e94f352",
           "modelFile": "ta_IN-rasa_male-medium.onnx",
-          "configFile": "ta_IN-rasa_male-medium.onnx.json"
+          "modelSha256": "0df057808d684ce59e3fd1cb02d6bfd5ef860d14a9e3c515c65ca5c61062ce39",
+          "configFile": "ta_IN-rasa_male-medium.onnx.json",
+          "configSha256": "b4e9c2b637d80f4a6de1be6ffd6c7ae1bc97a1420698e2bf9df7fedc352488d1"
         }
       ]
     },
