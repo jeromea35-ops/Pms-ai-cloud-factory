@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "target": {
+    "runtime": "offline-local",
+    "primaryDeviceClass": "Android ARM64, 8 GB physical RAM",
+    "networkRequiredAtInference": false,
+    "paidApiFallbackAllowed": false,
+    "loadPolicy": "sequential-model-load-unload"
+  },
+  "packs": {
+    "VISUAL_PACK_V1": {
+      "status": "verified-source",
+      "engine": "stable-diffusion.cpp",
+      "engineCommit": "59c23bce0d82be3a922023ab811194f05b3e2faa",
+      "model": {
+        "repo": "second-state/stable-diffusion-v1-5-GGUF",
+        "revision": "f41080936c76af537542aedf67f0dab94e1f337f",
+        "file": "stable-diffusion-v1-5-pruned-emaonly-Q4_0.gguf",
+        "sha256": "b8944e9fe0b69b36ae1b5bb0185b3a7b8ef14347fe0fa9af6c64c4829022261f"
+      }
+    },
+    "TAMIL_VOICE_PACK_V1": {
+      "status": "verified-cloud-proof",
+      "role": "local fallback voice pack",
+      "license": "CC-BY-4.0",
+      "voices": [
+        {
+          "id": "ta-rasa-female-medium",
+          "repo": "tinisoft/piper-ta_IN-rasa_female-medium",
+          "revision": "89e15edafc8b31e66ddf25f2adbe3bd3f20a9496",
+          "modelFile": "ta_IN-rasa_female-medium.onnx",
+          "modelSha256": "1befd7c4034429cecf3143d5eab4810b29833420aedb951bef4092779d074d59",
+          "configFile": "ta_IN-rasa_female-medium.onnx.json",
+          "configSha256": "e49a5f947bfe64bc232d9f900a163b3b771b812780fd8efe0d411a3d8f4b4ee2"
+        },
+        {
+          "id": "ta-rasa-male-medium",
+          "repo": "tinisoft/piper-ta_IN-rasa_male-medium",
+          "revision": "0b041f8e882b1e6f41f427169be25bcb0e94f352",
+          "modelFile": "ta_IN-rasa_male-medium.onnx",
+          "modelSha256": "0df057808d684ce59e3fd1cb02d6bfd5ef860d14a9e3c515c65ca5c61062ce39",
+          "configFile": "ta_IN-rasa_male-medium.onnx.json",
+          "configSha256": "b4e9c2b637d80f4a6de1be6ffd6c7ae1bc97a1420698e2bf9df7fedc352488d1"
+        }
+      ]
+    },
+    "LIPSYNC_PACK_V1": {
+      "status": "pending-device-feasibility",
+      "candidate": "MuseTalk",
+      "notes": "Do not auto-download until Android ARM64 runtime/RAM and dependency-license gates pass."
+    },
+    "MOTION_PACK_V1": {
+      "status": "pending-device-feasibility",
+      "notes": "Adapter slot only until an 8 GB Android memory test passes for the chosen I2V runtime."
+    },
+    "SINGING_PACK_V1": {
+      "status": "pending-model-selection",
+      "notes": "Must be local/offline and commercially usable before inclusion."
+    }
+  }
+}
