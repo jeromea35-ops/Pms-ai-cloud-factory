@@ -1,0 +1,250 @@
+name: PMS Android ARM64 Visual Q4 Pack Assembly
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [local-engine-factory-v1]
+    paths:
+      - .github/workflows/cloud-visual-q4-pack.yml
+      - factory/LOCAL_MODEL_MANIFEST.json
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: pms-visual-q4-assembly-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CORE_ARTIFACT_ID: "10459186237"
+  CORE_ARTIFACT_NAME: pms-local-core-pack-android-arm64
+  CORE_ARTIFACT_SIZE: "132079670"
+  CORE_ARTIFACT_SHA256: 65f8d7aba66b3b41f7a64001d7b394e2d9f12c8c5d6b9e599563cde17ad4d337
+  CORE_RUN_ID: "35124473811"
+  CORE_HEAD_SHA: 0b04feb944ff170454e0610f63b3f3d17c91b465
+  CORE_EXPIRES_AT: "2026-09-23T16:53:36Z"
+  MODEL_REPO: second-state/stable-diffusion-v1-5-GGUF
+  MODEL_COMMIT: f41080936c76af537542aedf67f0dab94e1f337f
+  MODEL_FILE: stable-diffusion-v1-5-pruned-emaonly-Q4_0.gguf
+  MODEL_SIZE: "1566768416"
+  MODEL_SHA256: b8944e9fe0b69b36ae1b5bb0185b3a7b8ef14347fe0fa9af6c64c4829022261f
+
+jobs:
+  assemble-visual-q4-pack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout factory repository
+        uses: actions/checkout@v4
+
+      - name: Install assembly tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends curl file binutils
+
+      - name: Validate pinned core artifact metadata
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CORE_ARTIFACT_ID}"
+          curl --fail --location --retry 5 --retry-delay 3 \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --output core-artifact.json \
+            "${api}"
+
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open("core-artifact.json", encoding="utf-8") as handle:
+              artifact = json.load(handle)
+
+          expected = {
+              "id": int(os.environ["CORE_ARTIFACT_ID"]),
+              "name": os.environ["CORE_ARTIFACT_NAME"],
+              "size_in_bytes": int(os.environ["CORE_ARTIFACT_SIZE"]),
+              "digest": "sha256:" + os.environ["CORE_ARTIFACT_SHA256"],
+              "expires_at": os.environ["CORE_EXPIRES_AT"],
+          }
+          for key, value in expected.items():
+              if artifact.get(key) != value:
+                  raise SystemExit(
+                      f"Core artifact metadata mismatch for {key}: "
+                      f"{artifact.get(key)!r} != {value!r}"
+                  )
+          if artifact.get("expired") is not False:
+              raise SystemExit("Pinned core artifact is expired")
+
+          workflow_run = artifact.get("workflow_run") or {}
+          if workflow_run.get("id") != int(os.environ["CORE_RUN_ID"]):
+              raise SystemExit("Pinned core workflow run mismatch")
+          if workflow_run.get("head_sha") != os.environ["CORE_HEAD_SHA"]:
+              raise SystemExit("Pinned core head SHA mismatch")
+          if workflow_run.get("head_branch") != "local-engine-factory-v1":
+              raise SystemExit("Pinned core branch mismatch")
+
+          print("Pinned core artifact metadata PASS")
+          PY
+
+      - name: Download and verify exact core artifact archive
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          archive_url="https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${CORE_ARTIFACT_ID}/zip"
+          curl --fail --location --retry 5 --retry-delay 3 \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --output core-pack.zip \
+            "${archive_url}"
+
+          actual_size="$(stat -c '%s' core-pack.zip)"
+          test "${actual_size}" = "${CORE_ARTIFACT_SIZE}"
+          echo "${CORE_ARTIFACT_SHA256}  core-pack.zip" | sha256sum --check --strict
+
+          python3 - <<'PY'
+          from pathlib import Path, PurePosixPath
+          from zipfile import ZipFile
+
+          destination = Path("pack")
+          destination.mkdir()
+
+          with ZipFile("core-pack.zip") as archive:
+              members = archive.infolist()
+              if not members:
+                  raise SystemExit("Core artifact archive is empty")
+              for member in members:
+                  path = PurePosixPath(member.filename)
+                  if path.is_absolute() or ".." in path.parts:
+                      raise SystemExit(f"Unsafe archive path: {member.filename}")
+              archive.extractall(destination)
+
+          print(f"Extracted {len(members)} verified core artifact entries")
+          PY
+
+      - name: Verify extracted Android ARM64 core pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f pack/SHA256SUMS
+          test -f pack/bin/sd-cli
+          test -f pack/manifests/LOCAL_MODEL_MANIFEST.json
+          test -f pack/verify.sh
+
+          (cd pack && sha256sum --check --strict SHA256SUMS)
+          file pack/bin/sd-cli | tee pack/manifests/sd-cli-assembly.file.txt
+          readelf -h pack/bin/sd-cli | grep -Eq 'Machine:.*AArch64'
+
+          python3 - <<'PY'
+          import json
+
+          with open("pack/manifests/LOCAL_MODEL_MANIFEST.json", encoding="utf-8") as handle:
+              manifest = json.load(handle)
+
+          target = manifest["target"]
+          visual = manifest["packs"]["VISUAL_PACK_V1"]
+          model = visual["model"]
+
+          assert target["networkRequiredAtInference"] is False
+          assert target["paidApiFallbackAllowed"] is False
+          assert visual["engineCommit"] == "59c23bce0d82be3a922023ab811194f05b3e2faa"
+          assert model["revision"] == "f41080936c76af537542aedf67f0dab94e1f337f"
+          assert model["file"] == "stable-diffusion-v1-5-pruned-emaonly-Q4_0.gguf"
+          assert model["sha256"] == "b8944e9fe0b69b36ae1b5bb0185b3a7b8ef14347fe0fa9af6c64c4829022261f"
+          print("Core manifest and Visual Q4 declaration PASS")
+          PY
+
+      - name: Download and verify pinned SD1.5 Q4_0 visual model
+        shell: bash
+        run: |
+          set -euo pipefail
+          model_dir="pack/models/visual/sd15-q4"
+          model_path="${model_dir}/${MODEL_FILE}"
+          model_url="https://huggingface.co/${MODEL_REPO}/resolve/${MODEL_COMMIT}/${MODEL_FILE}?download=true"
+
+          mkdir -p "${model_dir}"
+          curl --fail --location --retry 8 --retry-delay 5 --retry-all-errors \
+            --output "${model_path}.part" \
+            "${model_url}"
+          mv "${model_path}.part" "${model_path}"
+
+          actual_size="$(stat -c '%s' "${model_path}")"
+          test "${actual_size}" = "${MODEL_SIZE}"
+          echo "${MODEL_SHA256}  ${model_path}" | sha256sum --check --strict
+          echo "Pinned SD1.5 Q4_0 model PASS: ${actual_size} bytes"
+
+      - name: Finalize deployable Visual Q4 pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          chmod 755 pack/bin/sd-cli pack/verify.sh
+          find pack/tools -type f -name '*.sh' -exec chmod 755 {} +
+
+          cat > pack/INSTALL-ON-ANDROID.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+          cd "$ROOT"
+          chmod 755 bin/sd-cli verify.sh
+          find tools -type f -name '*.sh' -exec chmod 755 {} +
+          test "$(uname -m)" = "aarch64"
+          sha256sum --check --strict SHA256SUMS
+          test "$(stat -c '%s' models/visual/sd15-q4/stable-diffusion-v1-5-pruned-emaonly-Q4_0.gguf)" = "1566768416"
+          ./bin/sd-cli --help >/dev/null
+          echo "PMS Android ARM64 Visual Q4 pack verification PASS"
+          EOF
+          chmod 755 pack/INSTALL-ON-ANDROID.sh
+
+          cat > pack/manifests/VISUAL-Q4-ASSEMBLY-MANIFEST.txt <<EOF
+          status: ASSEMBLED_AND_HASH_VERIFIED
+          factory commit: ${GITHUB_SHA}
+          factory branch: ${GITHUB_REF_NAME}
+          assembly runner: GitHub-hosted ubuntu-latest
+          heavy assembly work on Vivo: false
+          target ABI: arm64-v8a
+          core artifact id: ${CORE_ARTIFACT_ID}
+          core artifact name: ${CORE_ARTIFACT_NAME}
+          core artifact archive bytes: ${CORE_ARTIFACT_SIZE}
+          core artifact archive SHA-256: ${CORE_ARTIFACT_SHA256}
+          core workflow run: ${CORE_RUN_ID}
+          core source commit: ${CORE_HEAD_SHA}
+          visual model repository: ${MODEL_REPO}
+          visual model commit: ${MODEL_COMMIT}
+          visual model file: ${MODEL_FILE}
+          visual model bytes: ${MODEL_SIZE}
+          visual model SHA-256: ${MODEL_SHA256}
+          inference network required: false
+          paid API fallback allowed: false
+          EOF
+
+          find pack -type f ! -name SHA256SUMS -printf '%P %s\n' \
+            | LC_ALL=C sort > pack/manifests/FILE-SIZES.txt
+          (
+            cd pack
+            find . -type f ! -name SHA256SUMS -print0 \
+              | LC_ALL=C sort -z \
+              | xargs -0 sha256sum > SHA256SUMS
+            sha256sum --check --strict SHA256SUMS
+          )
+          test ! -e "pack/models/visual/sd15-q4/${MODEL_FILE}.part"
+          du -sh pack
+          find pack -maxdepth 4 -type f -printf '%P %s bytes\n' | LC_ALL=C sort
+
+      - name: Upload complete Android ARM64 Visual Q4 pack
+        uses: actions/upload-artifact@v4
+        with:
+          name: pms-local-engine-visual-q4-android-arm64
+          path: pack/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
