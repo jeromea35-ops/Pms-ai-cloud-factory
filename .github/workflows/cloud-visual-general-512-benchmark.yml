@@ -1,0 +1,233 @@
+name: PMS Visual General 512 Benchmark
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [local-engine-factory-v1]
+    paths:
+      - .github/workflows/cloud-visual-general-512-benchmark.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pms-visual-general-512-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SD_REPO: https://github.com/leejet/stable-diffusion.cpp.git
+  SD_COMMIT: 59c23bce0d82be3a922023ab811194f05b3e2faa
+  MODEL_REPO: second-state/stable-diffusion-v1-5-GGUF
+  MODEL_COMMIT: f41080936c76af537542aedf67f0dab94e1f337f
+  MODEL_FILE: stable-diffusion-v1-5-pruned-emaonly-Q4_0.gguf
+  MODEL_SIZE: "1566768416"
+  MODEL_SHA256: b8944e9fe0b69b36ae1b5bb0185b3a7b8ef14347fe0fa9af6c64c4829022261f
+
+jobs:
+  generate-general-benchmark:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout factory repository
+        uses: actions/checkout@v4
+
+      - name: Install build and benchmark tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build cmake git curl file python3-pil python3-numpy
+
+      - name: Build pinned Linux benchmark runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone "${SD_REPO}" sd-src
+          cd sd-src
+          git checkout "${SD_COMMIT}"
+          git submodule update --init --recursive
+          test "$(git rev-parse HEAD)" = "${SD_COMMIT}"
+          cd ..
+
+          cmake -S sd-src -B build-host -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_OPENMP=OFF \
+            -DSD_WEBP=OFF \
+            -DSD_WEBM=OFF
+          cmake --build build-host --target sd-cli --parallel 2
+
+          SDCLI="$(find build-host -type f -name sd-cli -perm -111 | head -n 1)"
+          test -n "${SDCLI}"
+          echo "SDCLI=${SDCLI}" >> "${GITHUB_ENV}"
+          "${SDCLI}" --help >/dev/null
+
+      - name: Download and verify exact Q4 base model
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p inputs
+          MODEL_PATH="inputs/${MODEL_FILE}"
+
+          curl --fail --location --retry 8 --retry-delay 5 --retry-all-errors \
+            --output "${MODEL_PATH}.part" \
+            "https://huggingface.co/${MODEL_REPO}/resolve/${MODEL_COMMIT}/${MODEL_FILE}?download=true"
+          mv "${MODEL_PATH}.part" "${MODEL_PATH}"
+
+          test "$(stat -c '%s' "${MODEL_PATH}")" = "${MODEL_SIZE}"
+          echo "${MODEL_SHA256}  ${MODEL_PATH}" | sha256sum --check --strict
+
+      - name: Generate native 512 general benchmark
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p benchmark
+          NEGATIVE="cartoon, anime, painting, illustration, sculpture, wooden, low poly, deformed, malformed, duplicate, blurry, text, watermark, logo"
+          COMMON=(
+            -m "inputs/${MODEL_FILE}"
+            -n "${NEGATIVE}"
+            -W 512 -H 512
+            --steps 25
+            --cfg-scale 7
+            --sampling-method dpm++2m
+            --scheduler karras
+          )
+
+          "${SDCLI}" "${COMMON[@]}" \
+            -p "RAW macro photograph of one red hibiscus flower centered against a clean pale background, natural petals, detailed botanical texture, soft daylight, DSLR photo" \
+            --seed 42 \
+            -o benchmark/01-flower.png
+
+          "${SDCLI}" "${COMMON[@]}" \
+            -p "RAW head and shoulders DSLR portrait photograph of one 35 year old South Indian Tamil male farmer, realistic human skin, natural brown eyes looking at the camera, short black hair, white cotton shirt, soft daylight, 50mm lens, shallow depth of field" \
+            --seed 777 \
+            -o benchmark/02-human.png
+
+          "${SDCLI}" "${COMMON[@]}" \
+            -p "RAW realistic DSLR photograph of one healthy brown Indian zebu cow standing sideways in a green farm field, full body visible, exactly four legs, natural daylight, detailed fur" \
+            --seed 321 \
+            -o benchmark/03-cow.png
+
+          "${SDCLI}" "${COMMON[@]}" \
+            -p "RAW realistic DSLR photograph of one healthy black and white goat standing sideways on grass, full body visible, exactly four legs, natural daylight, detailed fur, rural farm background" \
+            --seed 654 \
+            -o benchmark/04-goat.png
+
+          "${SDCLI}" "${COMMON[@]}" \
+            -p "RAW landscape photograph of one large ancient banyan tree with a wide trunk, green canopy and hanging aerial roots in a quiet Tamil Nadu village, bright natural daylight, highly detailed" \
+            --seed 987 \
+            -o benchmark/05-banyan-tree.png
+
+          "${SDCLI}" "${COMMON[@]}" \
+            -p "RAW realistic street photograph of one yellow and black Indian auto rickshaw parked on a rural road, complete vehicle visible, exactly three wheels, natural daylight, detailed metal body" \
+            --seed 246 \
+            -o benchmark/06-auto-rickshaw.png
+
+          "${SDCLI}" "${COMMON[@]}" \
+            -p "RAW realistic photograph of a Tamil Nadu village scene, one male farmer standing beside one brown cow under a large banyan tree, a small tiled-roof house in the background, coherent composition, natural daylight" \
+            --seed 135 \
+            -o benchmark/07-village-scene.png
+
+          for image in benchmark/*.png; do
+            test -s "${image}"
+            file "${image}"
+          done
+
+      - name: Build contact sheet and evidence manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          import numpy as np
+          from PIL import Image, ImageDraw
+
+          entries = [
+              ("01-flower.png", "Flower", 42),
+              ("02-human.png", "Human portrait", 777),
+              ("03-cow.png", "Indian cow", 321),
+              ("04-goat.png", "Goat", 654),
+              ("05-banyan-tree.png", "Banyan tree", 987),
+              ("06-auto-rickshaw.png", "Auto rickshaw", 246),
+              ("07-village-scene.png", "Village multi-object", 135),
+          ]
+
+          images = {}
+          stats = {}
+          for filename, label, seed in entries:
+              path = Path("benchmark") / filename
+              image = Image.open(path).convert("RGB")
+              if image.size != (512, 512):
+                  raise SystemExit(f"Unexpected dimensions for {filename}: {image.size}")
+              array = np.asarray(image, dtype=np.float32)
+              luminance = array.mean(axis=2)
+              images[filename] = image
+              stats[filename] = {
+                  "label": label,
+                  "seed": seed,
+                  "rgb_mean": float(array.mean()),
+                  "rgb_std": float(array.std()),
+                  "luma_std": float(luminance.std()),
+                  "horizontal_gradient": float(np.abs(np.diff(luminance, axis=1)).mean()),
+                  "vertical_gradient": float(np.abs(np.diff(luminance, axis=0)).mean()),
+                  "quantized_colors": int(np.unique((array // 16).astype(np.uint8).reshape(-1, 3), axis=0).shape[0]),
+              }
+
+          thumb_size, label_height = 320, 42
+          cell_height = thumb_size + label_height
+          sheet = Image.new("RGB", (thumb_size * 3, cell_height * 3), "white")
+          draw = ImageDraw.Draw(sheet)
+          for index, (filename, label, seed) in enumerate(entries):
+              x = (index % 3) * thumb_size
+              y = (index // 3) * cell_height
+              draw.rectangle((x, y, x + thumb_size - 1, y + label_height - 1), fill="white")
+              draw.text((x + 8, y + 14), f"{label} / seed {seed}", fill="black")
+              thumb = images[filename].resize((thumb_size, thumb_size), Image.Resampling.LANCZOS)
+              sheet.paste(thumb, (x, y + label_height))
+          draw.text((thumb_size + 8, cell_height * 2 + 14), "Manual visual review required", fill="black")
+          sheet.save("benchmark/GENERAL-512-CONTACT-SHEET.png")
+
+          Path("benchmark/GENERAL-512-STATS.json").write_text(
+              json.dumps(stats, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          print(json.dumps(stats, indent=2, sort_keys=True))
+          PY
+
+          cat > benchmark/GENERAL-512-MANIFEST.txt <<EOF
+          status: REQUIRES_MANUAL_VISUAL_REVIEW
+          factory commit: ${GITHUB_SHA}
+          factory branch: ${GITHUB_REF_NAME}
+          stable-diffusion.cpp commit: ${SD_COMMIT}
+          model repository: ${MODEL_REPO}
+          model commit: ${MODEL_COMMIT}
+          model file: ${MODEL_FILE}
+          model bytes: ${MODEL_SIZE}
+          model SHA-256: ${MODEL_SHA256}
+          inference network required: false
+          width: 512
+          height: 512
+          steps: 25
+          cfg-scale: 7
+          sampler: dpm++2m
+          scheduler: karras
+          automatic semantic pass allowed: false
+          EOF
+
+          (
+            cd benchmark
+            sha256sum -- *.png > GENERAL-512-SHA256SUMS
+            sha256sum --check --strict GENERAL-512-SHA256SUMS
+          )
+
+      - name: Upload general benchmark evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: pms-visual-general-512-benchmark
+          path: benchmark/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
