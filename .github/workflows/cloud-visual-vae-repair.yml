@@ -1,0 +1,224 @@
+name: PMS Local Visual VAE Repair Pack
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [local-engine-factory-v1]
+    paths:
+      - .github/workflows/cloud-visual-vae-repair.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pms-visual-vae-repair-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SD_REPO: https://github.com/leejet/stable-diffusion.cpp.git
+  SD_COMMIT: 59c23bce0d82be3a922023ab811194f05b3e2faa
+  MODEL_REPO: second-state/stable-diffusion-v1-5-GGUF
+  MODEL_COMMIT: f41080936c76af537542aedf67f0dab94e1f337f
+  MODEL_FILE: stable-diffusion-v1-5-pruned-emaonly-Q4_0.gguf
+  MODEL_SIZE: "1566768416"
+  MODEL_SHA256: b8944e9fe0b69b36ae1b5bb0185b3a7b8ef14347fe0fa9af6c64c4829022261f
+  VAE_REPO: stabilityai/sd-vae-ft-mse-original
+  VAE_COMMIT: 629b3ad3030ce36e15e70c5db7d91df0d60c627f
+  VAE_FILE: vae-ft-mse-840000-ema-pruned.safetensors
+  VAE_SIZE: "334641190"
+  VAE_SHA256: 735e4c3a447a3255760d7f86845f09f937809baa529c17370d83e4c3758f3c75
+
+jobs:
+  assemble-vae-repair-pack:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout factory repository
+        uses: actions/checkout@v4
+
+      - name: Install build and validation tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build cmake git curl file python3-pil python3-numpy
+
+      - name: Build pinned Linux smoke-test runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone "${SD_REPO}" sd-src
+          cd sd-src
+          git checkout "${SD_COMMIT}"
+          git submodule update --init --recursive
+          test "$(git rev-parse HEAD)" = "${SD_COMMIT}"
+          cd ..
+
+          cmake -S sd-src -B build-host -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_OPENMP=OFF \
+            -DSD_WEBP=OFF \
+            -DSD_WEBM=OFF
+          cmake --build build-host --target sd-cli --parallel 2
+
+          SDCLI="$(find build-host -type f -name sd-cli -perm -111 | head -n 1)"
+          test -n "${SDCLI}"
+          echo "SDCLI=${SDCLI}" >> "${GITHUB_ENV}"
+          "${SDCLI}" --help >/dev/null
+
+      - name: Download and verify pinned Q4 model and standalone VAE
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p inputs
+          MODEL_PATH="inputs/${MODEL_FILE}"
+          VAE_PATH="inputs/${VAE_FILE}"
+
+          curl --fail --location --retry 8 --retry-delay 5 --retry-all-errors \
+            --output "${MODEL_PATH}.part" \
+            "https://huggingface.co/${MODEL_REPO}/resolve/${MODEL_COMMIT}/${MODEL_FILE}?download=true"
+          mv "${MODEL_PATH}.part" "${MODEL_PATH}"
+
+          curl --fail --location --retry 8 --retry-delay 5 --retry-all-errors \
+            --output "${VAE_PATH}.part" \
+            "https://huggingface.co/${VAE_REPO}/resolve/${VAE_COMMIT}/${VAE_FILE}?download=true"
+          mv "${VAE_PATH}.part" "${VAE_PATH}"
+
+          test "$(stat -c '%s' "${MODEL_PATH}")" = "${MODEL_SIZE}"
+          test "$(stat -c '%s' "${VAE_PATH}")" = "${VAE_SIZE}"
+          echo "${MODEL_SHA256}  ${MODEL_PATH}" | sha256sum --check --strict
+          echo "${VAE_SHA256}  ${VAE_PATH}" | sha256sum --check --strict
+
+      - name: Generate cloud repair proof
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p smoke
+          "${SDCLI}" \
+            -m "inputs/${MODEL_FILE}" \
+            --vae "inputs/${VAE_FILE}" \
+            -p "a single red hibiscus flower centered on a plain white background, detailed botanical illustration" \
+            -n "abstract, blurry, distorted, text, watermark" \
+            -o smoke/cloud-vae-repair-proof.png \
+            -W 256 -H 256 \
+            --steps 8 \
+            --cfg-scale 7 \
+            --seed 42 \
+            --linear-scale 0.00390625 \
+            --attn-scale 0.00390625
+
+          test -s smoke/cloud-vae-repair-proof.png
+          python3 - <<'PY'
+          from pathlib import Path
+          import numpy as np
+          from PIL import Image
+
+          path = Path("smoke/cloud-vae-repair-proof.png")
+          image = Image.open(path).convert("RGB")
+          if image.size != (256, 256):
+              raise SystemExit(f"Unexpected proof dimensions: {image.size}")
+
+          pixels = np.asarray(image, dtype=np.float32)
+          luminance = pixels.mean(axis=2)
+          stats = {
+              "rgb_std": float(pixels.std()),
+              "luma_std": float(luminance.std()),
+              "horizontal_gradient": float(np.abs(np.diff(luminance, axis=1)).mean()),
+              "vertical_gradient": float(np.abs(np.diff(luminance, axis=0)).mean()),
+              "quantized_colors": int(np.unique((pixels // 16).astype(np.uint8).reshape(-1, 3), axis=0).shape[0]),
+          }
+          if stats["rgb_std"] < 10 or stats["luma_std"] < 8:
+              raise SystemExit(f"Proof image is too flat: {stats}")
+          if stats["quantized_colors"] < 64:
+              raise SystemExit(f"Proof image has too few colors: {stats}")
+
+          report = "\n".join(f"{key}: {value}" for key, value in stats.items()) + "\n"
+          Path("smoke/cloud-vae-repair-proof.txt").write_text(report, encoding="utf-8")
+          print(report, end="")
+          PY
+
+      - name: Assemble phone-side VAE repair overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact/models/visual/vae artifact/manifests artifact/smoke
+          cp "inputs/${VAE_FILE}" "artifact/models/visual/vae/${VAE_FILE}"
+          cp smoke/cloud-vae-repair-proof.png smoke/cloud-vae-repair-proof.txt artifact/smoke/
+
+          cat > artifact/VERIFY-VAE-REPAIR.sh <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          ROOT="\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)"
+          cd "\$ROOT"
+          sha256sum --check --strict VAE-REPAIR-SHA256SUMS
+          test "\$(stat -c '%s' models/visual/vae/${VAE_FILE})" = "${VAE_SIZE}"
+          test -x bin/sd-cli
+          test -f models/visual/sd15-q4/${MODEL_FILE}
+          ./bin/sd-cli --help >/dev/null
+          echo "PMS local visual standalone VAE repair verification PASS"
+          EOF
+
+          cat > artifact/RUN-VISUAL-WITH-VAE.sh <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          ROOT="\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)"
+          cd "\$ROOT"
+          PROMPT="\${1:-a single red hibiscus flower centered on a plain white background, detailed botanical illustration}"
+          OUTPUT="\${2:-output/pms-visual-vae.png}"
+          STEPS="\${PMS_STEPS:-8}"
+          WIDTH="\${PMS_WIDTH:-256}"
+          HEIGHT="\${PMS_HEIGHT:-256}"
+          mkdir -p "\$(dirname -- "\$OUTPUT")"
+          exec ./bin/sd-cli \
+            -m models/visual/sd15-q4/${MODEL_FILE} \
+            --vae models/visual/vae/${VAE_FILE} \
+            -p "\$PROMPT" \
+            -n "abstract, blurry, distorted, text, watermark" \
+            -o "\$OUTPUT" \
+            -W "\$WIDTH" -H "\$HEIGHT" \
+            --steps "\$STEPS" \
+            --cfg-scale 7 \
+            --seed 42 \
+            --linear-scale 0.00390625 \
+            --attn-scale 0.00390625
+          EOF
+
+          cat > artifact/manifests/VAE-REPAIR-MANIFEST.txt <<EOF
+          status: CLOUD_SMOKE_GENERATED_AND_HASH_VERIFIED
+          factory commit: ${GITHUB_SHA}
+          factory branch: ${GITHUB_REF_NAME}
+          stable-diffusion.cpp commit: ${SD_COMMIT}
+          Q4 model repository: ${MODEL_REPO}
+          Q4 model commit: ${MODEL_COMMIT}
+          Q4 model SHA-256: ${MODEL_SHA256}
+          VAE repository: ${VAE_REPO}
+          VAE commit: ${VAE_COMMIT}
+          VAE file: ${VAE_FILE}
+          VAE bytes: ${VAE_SIZE}
+          VAE SHA-256: ${VAE_SHA256}
+          cloud proof: smoke/cloud-vae-repair-proof.png
+          inference network required: false
+          paid API fallback allowed: false
+          EOF
+
+          chmod 755 artifact/VERIFY-VAE-REPAIR.sh artifact/RUN-VISUAL-WITH-VAE.sh
+          (
+            cd artifact
+            find . -type f ! -name VAE-REPAIR-SHA256SUMS -print0 \
+              | LC_ALL=C sort -z \
+              | xargs -0 sha256sum > VAE-REPAIR-SHA256SUMS
+            sha256sum --check --strict VAE-REPAIR-SHA256SUMS
+          )
+          test "$(stat -c '%s' "artifact/models/visual/vae/${VAE_FILE}")" = "${VAE_SIZE}"
+          find artifact -type f -printf '%P %s bytes\n' | LC_ALL=C sort
+
+      - name: Upload standalone Android visual VAE repair pack
+        uses: actions/upload-artifact@v4
+        with:
+          name: pms-local-visual-vae-repair
+          path: artifact/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
