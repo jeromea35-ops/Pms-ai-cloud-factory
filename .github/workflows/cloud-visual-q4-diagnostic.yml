@@ -1,0 +1,237 @@
+name: PMS Visual Q4 Diagnostic Proofs
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [local-engine-factory-v1]
+    paths:
+      - .github/workflows/cloud-visual-q4-diagnostic.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pms-visual-q4-diagnostic-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  SD_REPO: https://github.com/leejet/stable-diffusion.cpp.git
+  SD_COMMIT: 59c23bce0d82be3a922023ab811194f05b3e2faa
+  MODEL_REPO: second-state/stable-diffusion-v1-5-GGUF
+  MODEL_COMMIT: f41080936c76af537542aedf67f0dab94e1f337f
+  MODEL_FILE: stable-diffusion-v1-5-pruned-emaonly-Q4_0.gguf
+  MODEL_SIZE: "1566768416"
+  MODEL_SHA256: b8944e9fe0b69b36ae1b5bb0185b3a7b8ef14347fe0fa9af6c64c4829022261f
+  VAE_REPO: stabilityai/sd-vae-ft-mse-original
+  VAE_COMMIT: 629b3ad3030ce36e15e70c5db7d91df0d60c627f
+  VAE_FILE: vae-ft-mse-840000-ema-pruned.safetensors
+  VAE_SIZE: "334641190"
+  VAE_SHA256: 735e4c3a447a3255760d7f86845f09f937809baa529c17370d83e4c3758f3c75
+
+jobs:
+  generate-diagnostic-proofs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout factory repository
+        uses: actions/checkout@v4
+
+      - name: Install build and proof tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build cmake git curl file python3-pil python3-numpy
+
+      - name: Build pinned Linux diagnostic runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone "${SD_REPO}" sd-src
+          cd sd-src
+          git checkout "${SD_COMMIT}"
+          git submodule update --init --recursive
+          test "$(git rev-parse HEAD)" = "${SD_COMMIT}"
+          cd ..
+
+          cmake -S sd-src -B build-host -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DGGML_OPENMP=OFF \
+            -DSD_WEBP=OFF \
+            -DSD_WEBM=OFF
+          cmake --build build-host --target sd-cli --parallel 2
+
+          SDCLI="$(find build-host -type f -name sd-cli -perm -111 | head -n 1)"
+          test -n "${SDCLI}"
+          echo "SDCLI=${SDCLI}" >> "${GITHUB_ENV}"
+          "${SDCLI}" --help >/dev/null
+
+      - name: Download and verify exact diagnostic inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p inputs
+          MODEL_PATH="inputs/${MODEL_FILE}"
+          VAE_PATH="inputs/${VAE_FILE}"
+
+          curl --fail --location --retry 8 --retry-delay 5 --retry-all-errors \
+            --output "${MODEL_PATH}.part" \
+            "https://huggingface.co/${MODEL_REPO}/resolve/${MODEL_COMMIT}/${MODEL_FILE}?download=true"
+          mv "${MODEL_PATH}.part" "${MODEL_PATH}"
+
+          curl --fail --location --retry 8 --retry-delay 5 --retry-all-errors \
+            --output "${VAE_PATH}.part" \
+            "https://huggingface.co/${VAE_REPO}/resolve/${VAE_COMMIT}/${VAE_FILE}?download=true"
+          mv "${VAE_PATH}.part" "${VAE_PATH}"
+
+          test "$(stat -c '%s' "${MODEL_PATH}")" = "${MODEL_SIZE}"
+          test "$(stat -c '%s' "${VAE_PATH}")" = "${VAE_SIZE}"
+          echo "${MODEL_SHA256}  ${MODEL_PATH}" | sha256sum --check --strict
+          echo "${VAE_SHA256}  ${VAE_PATH}" | sha256sum --check --strict
+
+      - name: Generate controlled Q4 proof matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p proofs
+          PROMPT="a single red hibiscus flower centered on a plain white background, detailed botanical illustration"
+          NEGATIVE="abstract, blurry, distorted, text, watermark"
+          BASE=(
+            -m "inputs/${MODEL_FILE}"
+            -p "${PROMPT}"
+            -n "${NEGATIVE}"
+            -W 256 -H 256
+            --steps 20
+            --cfg-scale 7
+            --seed 42
+          )
+
+          "${SDCLI}" "${BASE[@]}" \
+            -o proofs/01-internal-vae-no-scale.png
+
+          "${SDCLI}" "${BASE[@]}" \
+            --vae "inputs/${VAE_FILE}" \
+            -o proofs/02-external-vae-no-scale.png
+
+          "${SDCLI}" "${BASE[@]}" \
+            --linear-scale 0.0078125 \
+            --attn-scale 0.0078125 \
+            -o proofs/03-internal-vae-scale-128.png
+
+          "${SDCLI}" "${BASE[@]}" \
+            --vae "inputs/${VAE_FILE}" \
+            --linear-scale 0.0078125 \
+            --attn-scale 0.0078125 \
+            -o proofs/04-external-vae-scale-128.png
+
+          "${SDCLI}" "${BASE[@]}" \
+            --vae "inputs/${VAE_FILE}" \
+            --linear-scale 0.00390625 \
+            --attn-scale 0.00390625 \
+            -o proofs/05-external-vae-scale-256.png
+
+          for image in proofs/*.png; do
+            test -s "${image}"
+            file "${image}"
+          done
+
+      - name: Build contact sheet and diagnostic statistics
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          import numpy as np
+          from PIL import Image, ImageDraw
+
+          entries = [
+              ("01-internal-vae-no-scale.png", "Internal VAE / no scale"),
+              ("02-external-vae-no-scale.png", "External VAE / no scale"),
+              ("03-internal-vae-scale-128.png", "Internal VAE / scale 1/128"),
+              ("04-external-vae-scale-128.png", "External VAE / scale 1/128"),
+              ("05-external-vae-scale-256.png", "External VAE / scale 1/256"),
+          ]
+
+          arrays = {}
+          images = {}
+          stats = {}
+          for filename, label in entries:
+              path = Path("proofs") / filename
+              image = Image.open(path).convert("RGB")
+              if image.size != (256, 256):
+                  raise SystemExit(f"Unexpected dimensions for {filename}: {image.size}")
+              array = np.asarray(image, dtype=np.float32)
+              luminance = array.mean(axis=2)
+              arrays[filename] = array
+              images[filename] = image
+              stats[filename] = {
+                  "label": label,
+                  "rgb_mean": float(array.mean()),
+                  "rgb_std": float(array.std()),
+                  "luma_std": float(luminance.std()),
+                  "horizontal_gradient": float(np.abs(np.diff(luminance, axis=1)).mean()),
+                  "vertical_gradient": float(np.abs(np.diff(luminance, axis=0)).mean()),
+                  "quantized_colors": int(np.unique((array // 16).astype(np.uint8).reshape(-1, 3), axis=0).shape[0]),
+              }
+
+          reference = arrays[entries[0][0]]
+          for filename, _ in entries:
+              delta = arrays[filename] - reference
+              stats[filename]["rms_vs_internal_no_scale"] = float(np.sqrt(np.mean(delta * delta)))
+
+          cell_width, cell_height, label_height = 256, 292, 36
+          sheet = Image.new("RGB", (cell_width * 3, cell_height * 2), "white")
+          draw = ImageDraw.Draw(sheet)
+          for index, (filename, label) in enumerate(entries):
+              x = (index % 3) * cell_width
+              y = (index // 3) * cell_height
+              draw.rectangle((x, y, x + cell_width - 1, y + label_height - 1), fill="white")
+              draw.text((x + 6, y + 11), label, fill="black")
+              sheet.paste(images[filename], (x, y + label_height))
+          draw.text((cell_width * 2 + 6, cell_height + 11), "Manual visual review required", fill="black")
+          sheet.save("proofs/Q4-DIAGNOSTIC-CONTACT-SHEET.png")
+
+          Path("proofs/Q4-DIAGNOSTIC-STATS.json").write_text(
+              json.dumps(stats, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          print(json.dumps(stats, indent=2, sort_keys=True))
+          PY
+
+          cat > proofs/Q4-DIAGNOSTIC-MANIFEST.txt <<EOF
+          status: REQUIRES_MANUAL_VISUAL_REVIEW
+          factory commit: ${GITHUB_SHA}
+          factory branch: ${GITHUB_REF_NAME}
+          stable-diffusion.cpp commit: ${SD_COMMIT}
+          Q4 model repository: ${MODEL_REPO}
+          Q4 model commit: ${MODEL_COMMIT}
+          Q4 model SHA-256: ${MODEL_SHA256}
+          external VAE repository: ${VAE_REPO}
+          external VAE commit: ${VAE_COMMIT}
+          external VAE SHA-256: ${VAE_SHA256}
+          prompt: a single red hibiscus flower centered on a plain white background, detailed botanical illustration
+          dimensions: 256x256
+          steps: 20
+          cfg-scale: 7
+          seed: 42
+          automatic semantic pass allowed: false
+          EOF
+
+          (
+            cd proofs
+            sha256sum -- *.png > Q4-DIAGNOSTIC-SHA256SUMS
+            sha256sum --check --strict Q4-DIAGNOSTIC-SHA256SUMS
+          )
+
+      - name: Upload diagnostic proof set
+        uses: actions/upload-artifact@v4
+        with:
+          name: pms-visual-q4-diagnostic-proofs
+          path: proofs/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 6
